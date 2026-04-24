@@ -1,0 +1,491 @@
+---
+title: "Dutch Precipitation Catastrophe Model"
+subtitle: "Probabilistic nat cat model — GEV hazard, copula dependence, sigmoid vulnerability"
+author: "Richard Marek"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    code-fold: true
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    embed-resources: true
+    fig-width: 9
+    fig-height: 5
+    fig-align: center
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+```{r setup, include=FALSE}
+library(evd)
+library(copula)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+```
+
+---
+
+> **Note:** Exposure values and vulnerability parameters in this model are entirely
+> synthetic. The hazard component (GEV distributions and copula) is fitted to real
+> observational data from five Dutch meteorological stations; everything downstream
+> is for educational and demonstration purposes only.
+
+---
+
+## Model Architecture
+
+This catastrophe model follows the standard four-component structure used in
+commercial nat cat models (RMS, Verisk AIR, PERILS):
+
+| Component | Implementation |
+|-----------|---------------|
+| **Hazard** | GEV distributions fitted to observed annual maximum precipitation; spatial dependence via 5D Gumbel copula (see [my thesis practical chapter](https://risam0arek.github.io/precipitation-extremes-gev-copula/) for discussion of copula selection) |
+| **Frequency** | Poisson process, $\lambda$ = 0.5 events per year |
+| **Vulnerability** | Sigmoid damage functions, two building classes per station |
+| **Exposure** | Synthetic portfolio, five model locations (EUR), each represented by a meteorological station |
+
+The hazard component is carried over directly from the companion precipitation
+analysis. The GEV parameters and copula were estimated from [NOAA National Centers for Environmental Information (NCEI)](https://www.ncei.noaa.gov/products/land-based-station/global-historical-climatology-network-daily)
+daily records at five Dutch stations (Groningen, Roermond, Den Helder, Hoofddorp, Putten), covering approximately 1860–2020.
+
+The annual loss simulation proceeds as follows for each simulated year,
+where $i = 1, \ldots, 5$ indexes the five model locations (Groningen, Roermond, Den Helder, Hoofddorp, Putten), each represented by a corresponding meteorological station and $c \in \{\text{resilient}, \text{vulnerable}\}$
+denotes the building class:
+
+1. Draw the number of events $N \sim \text{Poisson}(\lambda)$
+2. For each event, draw a joint sample $\mathbf{U} = (U_1, \ldots, U_5) \sim C_{5D}$
+   from the 5-dimensional Gumbel copula, where $U_i \sim U(0,1)$ marginally
+3. Transform to precipitation intensities via the inverse GEV distribution function:
+   $H_i = F_i^{-1}(U_i;\, \hat{\mu}_i, \hat{\sigma}_i, \hat{\xi}_i)$,
+   where $F_i^{-1}$ is the quantile function of the GEV distribution with
+   location $\hat{\mu}_i$, scale $\hat{\sigma}_i$, and shape $\hat{\xi}_i$
+   estimated from observed annual maxima at station $i$
+4. Apply station- and class-specific vulnerability functions $D_{ic}: [0, \infty) \to [0,    1]$ to obtain damage ratios:
+   $D_{ic} = D(H_i;\, h_{0,ic},\, k_{ic}) \in [0, 1]$
+5. Compute event loss $L = \sum_{i=1}^{5} \sum_{c} E_{ic} \cdot D_{ic}$,
+   where $E_{ic} > 0$ is the total insured value (EUR) at location $i$
+   for building class $c$, and $D_{ic} \in [0,1]$ is the
+   corresponding damage ratio from step 4
+6. Sum event losses within the year to obtain annual loss:
+   $L_{\text{year}} = \sum_{j=1}^{N} L^{(j)}$
+
+Each model location represents an aggregated exposure cluster and is associated with a single meteorological station, whose fitted GEV distribution defines the local hazard intensity.
+
+---
+
+## Setup
+
+```{r load-data}
+cop5d         <- readRDS("cop5d.rds")
+params_table  <- readRDS("params_table.rds")
+station_names <- readRDS("station_names.rds")
+
+mu    <- params_table$mu
+sigma <- params_table$sigma
+xi    <- params_table$xi
+```
+
+---
+
+## Portfolio
+
+The synthetic portfolio assigns insured values (EUR) to two building classes at each of the five model locations. **Resilient** buildings represent modern, well-maintained structures with higher damage thresholds and shallower vulnerability curves. **Vulnerable** buildings
+represent older stock with lower thresholds and steeper curves — consistent with the
+distinction commonly made in commercial models between construction classes A and D.
+
+```{r portfolio}
+E <- matrix(c(
+  3.0e9, 2.0e9,
+  2.5e9, 1.5e9,
+  4.0e9, 2.0e9,
+  3.5e9, 1.5e9,
+  2.0e9, 1.0e9
+), nrow = 5, byrow = TRUE,
+dimnames = list(station_names, c("resilient", "vulnerable")))
+
+# Display
+as.data.frame(E) %>%
+  mutate("Model location" = station_names,
+         Total   = resilient + vulnerable,
+         across(c(resilient, vulnerable, Total),
+                ~ paste0(round(.x / 1e9, 1), " bn EUR"))) %>%
+  select("Model location", Resilient = resilient, Vulnerable = vulnerable, Total) %>%
+  knitr::kable(caption = "Synthetic insured portfolio by model location and building class.",
+                row.names = FALSE)
+```
+
+Total insured value: **EUR `r round(sum(E)/1e9, 1)` bn**.
+
+---
+
+## Vulnerability Functions
+
+### Parameterisation
+
+Each model location $i = 1, \ldots, 5$ and building class $c \in \{\text{resilient},
+\text{vulnerable}\}$ has its own sigmoid vulnerability curve
+$D_{ic}: [0, \infty) \to [0, 1]$:
+
+$$D_{ic}(h) = \frac{\tilde{\sigma}(h;\, h_{0,ic},\, k_{ic}) - 
+\tilde{\sigma}(0;\, h_{0,ic},\, k_{ic})}{1 - \tilde{\sigma}(0;\, h_{0,ic},\, k_{ic})},
+\qquad
+\tilde{\sigma}(h;\, h_0, k) = \frac{1}{1 + e^{-k(h - h_0)}}$$
+
+where $h$ is precipitation intensity [mm], $h_{0,ic} > 0$ is the intensity at which
+model location $i$, class $c$ reaches a 50% damage ratio, and $k_{ic} > 0$ controls the
+steepness of the transition. The baseline correction $\tilde{\sigma}(0;\, h_{0,ic},\,
+k_{ic})$ ensures $D_{ic}(0) = 0$, so no damage is modelled at zero intensity.
+The parameters $h_{0,ic}$ and $k_{ic}$ are listed in the table below.
+
+In commercial models (JBA, RMS, AIR), vulnerability curves are proprietary and
+calibrated against observed claims data, stratified by construction type, age,
+occupancy, and sometimes floor area. The parameters below are synthetic but reflect
+the general principle that resilient stock requires higher intensity before suffering
+significant damage, and transitions more gradually.
+
+```{r vuln-params}
+vuln_params <- list(
+  resilient = data.frame(
+    station = station_names,
+    h0 = c(90, 85, 95, 100, 88),    
+    k  = c(0.10, 0.09, 0.10, 0.11, 0.09)
+  ),
+  vulnerable = data.frame(
+    station = station_names,
+    h0 = c(60, 55, 65, 70, 58),     
+    k  = c(0.15, 0.13, 0.15, 0.17, 0.14)
+  )
+)
+
+bind_rows(
+  vuln_params$resilient %>% mutate(Class = "Resilient"),
+  vuln_params$vulnerable %>% mutate(Class = "Vulnerable")
+) %>%
+  select(Class, "Model location" = station, "h₀" = h0, k) %>%
+  knitr::kable(
+    caption = "Vulnerability function parameters per model location and building class.
+               h₀ = 50% damage threshold [mm], k = steepness.",
+    digits = 2)
+```
+
+### Vulnerability Curves
+
+```{r vuln-plot, fig.cap="Sigmoid vulnerability curves. Resilient stock (dashed) requires substantially higher intensity before reaching significant damage ratios."}
+vulnerability <- function(h, h0, k) {
+  raw      <- 1 / (1 + exp(-k * (h - h0)))
+  baseline <- 1 / (1 + exp(k * h0))
+  pmax((raw - baseline) / (1 - baseline), 0)
+}
+
+h_seq <- seq(0, 175, by = 1)
+
+vuln_curves <- bind_rows(lapply(c("resilient", "vulnerable"), function(cls) {
+  vp <- vuln_params[[cls]]
+  bind_rows(lapply(seq_len(nrow(vp)), function(i) {
+    data.frame(
+      station   = vp$station[i],
+      class     = cls,
+      intensity = h_seq,
+      damage    = vulnerability(h_seq, vp$h0[i], vp$k[i])
+    )
+  }))
+})) %>%
+  mutate(class = factor(class,
+                        levels = c("vulnerable", "resilient"),
+                        labels = c("Vulnerable", "Resilient")))
+
+midpoints <- vuln_curves %>%
+  group_by(station, class) %>%
+  summarise(h50 = intensity[which.min(abs(damage - 0.5))], .groups = "drop")
+
+ggplot(vuln_curves, aes(x = intensity, y = damage,
+                        colour = station, linetype = class)) +
+  geom_line(linewidth = 0.85, alpha = 0.9) +
+  #geom_point(data = midpoints,
+  #           aes(x = h50, y = 0.5, colour = station),
+  #           size = 2.5, shape = 21, fill = "white", stroke = 1.2,
+  #           inherit.aes = FALSE) +
+  geom_hline(yintercept = 0.5, colour = "#9CA3AF",
+             linewidth = 0.4, linetype = "dotted") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  scale_colour_brewer(palette = "Set1", name = "Station") +
+  scale_linetype_manual(name   = "Building class",
+                        values = c("Vulnerable" = "solid", "Resilient" = "dashed")) +
+  labs(title    = "Sigmoid Vulnerability Curves",
+       subtitle = "Damage ratio vs. precipitation intensity",
+       x        = "Precipitation Intensity (mm)",
+       y        = "Mean Damage Ratio",
+       caption  = "⚠ Synthetic parameters — for educational use only") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title      = element_text(face = "bold"),
+        plot.subtitle   = element_text(colour = "#6B7280", size = 10),
+        plot.caption    = element_text(colour = "#9CA3AF", size = 8, hjust = 0),
+        panel.grid.minor = element_blank())
+```
+
+---
+
+## Simulation
+
+### Event and Annual Loss Functions
+
+```{r sim-functions}
+simulate_event_loss <- function(cop, mu, sigma, xi, E, vuln_params) {
+  # 1. Draw joint sample from copula
+  U <- as.numeric(rCopula(1, cop))
+
+  # 2. Transform to precipitation intensities via inverse GEV
+  H <- mapply(function(u, m, s, x) qgev(u, loc = m, scale = s, shape = x),
+              U, mu, sigma, xi)
+  H <- pmax(H, 0)   # intensity cannot be negative
+
+  # 3. Apply vulnerability and compute loss
+  loss <- 0
+  for (cls in c("resilient", "vulnerable")) {
+    vp   <- vuln_params[[cls]]
+    D    <- mapply(vulnerability, H, vp$h0, vp$k)
+    loss <- loss + sum(E[, cls] * D)
+  }
+  return(loss)
+}
+
+simulate_annual_loss <- function(cop, mu, sigma, xi, E, vuln_params, lambda = 0.5) {
+  N          <- rpois(1, lambda)
+  total_loss <- 0
+  if (N > 0) {
+    for (j in seq_len(N))
+      total_loss <- total_loss +
+        simulate_event_loss(cop, mu, sigma, xi, E, vuln_params)
+  }
+  return(total_loss)
+}
+```
+
+### Monte Carlo Run (10,000 years)
+
+```{r monte-carlo, cache=TRUE}
+set.seed(123)
+n_years       <- 10000
+annual_losses <- numeric(n_years)
+
+for (i in seq_len(n_years))
+  annual_losses[i] <- simulate_annual_loss(cop5d, mu, sigma, xi, E, vuln_params)
+```
+
+---
+
+## Results
+
+### Risk Metrics
+
+```{r risk-metrics}
+AAL     <- mean(annual_losses)
+VaR_99  <- quantile(annual_losses, 0.99)
+VaR_995 <- quantile(annual_losses, 0.995)
+TVaR_99 <- mean(annual_losses[annual_losses > VaR_99])
+
+fmt <- function(x) paste0("EUR ", formatC(x / 1e9, format = "f", digits = 3), " bn")
+
+data.frame(
+  Metric = c("AAL", "VaR 99%", "VaR 99.5%", "TVaR 99%"),
+  Value  = c(fmt(AAL), fmt(VaR_99), fmt(VaR_995), fmt(TVaR_99)),
+  Interpretation = c(
+    "Long-run expected annual loss; basis for risk-adjusted pricing",
+    "1-in-100 year loss; common attachment point for excess of loss covers",
+    "1-in-200 year loss; Solvency II SCR reference level",
+    "Mean loss conditional on exceeding VaR 99%; coherent risk measure"
+  )
+) %>%
+  knitr::kable(caption = "Portfolio-level risk metrics from 10,000-year Monte Carlo simulation.")
+```
+
+The AAL represents the pure risk premium — the minimum technically adequate rate for
+this portfolio ignoring expenses, profit loading, and cost of capital. The gap between
+VaR 99% and TVaR 99% reflects the heaviness of the tail: a large gap indicates that
+when losses exceed the 1-in-100 threshold, they tend to be substantially worse than
+that threshold — relevant for sizing catastrophe excess of loss programmes.
+
+### Annual Loss Distribution
+
+```{r loss-dist-plot, fig.height=5, fig.cap="Annual loss distribution from 10,000-year Monte Carlo simulation. The distribution is right-skewed: most years see moderate aggregate losses, while rare years with multiple severe events drive the tail."}
+loss_df <- data.frame(loss = annual_losses / 1e9)
+
+metrics_df <- data.frame(
+  label  = c("VaR 99%", "VaR 99.5%", "TVaR 99%"),
+  value  = c(VaR_99, VaR_995, TVaR_99) / 1e9,
+  colour = c("#F59E0B", "#EF4444", "#8B5CF6")
+)
+
+ggplot(loss_df, aes(x = loss)) +
+  geom_histogram(bins = 60, fill = "#1D4ED8", colour = "white",
+                 linewidth = 0.2, alpha = 0.85) +
+  geom_vline(data = metrics_df,
+             aes(xintercept = value, colour = label, linetype = label),
+             linewidth = 0.9) +
+  geom_vline(xintercept = AAL / 1e9,
+             colour = "#6B7280", linewidth = 0.7, linetype = "dotted") +
+  annotate("text", x = AAL / 1e9, y = Inf,
+           label = sprintf("AAL = %.3f bn EUR", AAL / 1e9),
+           vjust = 1.6, hjust = -0.05, size = 3.5, colour = "#6B7280") +
+  scale_colour_manual(name   = "Risk metric",
+                      values = setNames(metrics_df$colour, metrics_df$label)) +
+  scale_linetype_manual(name   = "Risk metric",
+                        values = c("VaR 99%"   = "dashed",
+                                   "VaR 99.5%" = "dotdash",
+                                   "TVaR 99%"  = "solid")) +
+  coord_cartesian(xlim = c(0, 5.5)) +
+  labs(title    = "Annual Loss Distribution — Dutch Precipitation Cat Model",
+       subtitle = sprintf("Monte Carlo simulation  |  %s years  |  λ = 0.5 events/year",
+                          formatC(n_years, format = "d", big.mark = ",")),
+       x        = "Annual Loss (bn EUR)",
+       y        = "Frequency (years)",
+       caption  = "⚠ Synthetic exposures and vulnerability parameters — for educational use only") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold"),
+        plot.subtitle    = element_text(colour = "#6B7280", size = 10),
+        plot.caption     = element_text(colour = "#9CA3AF", size = 8, hjust = 0),
+        legend.position  = "top",
+        panel.grid.minor = element_blank())
+```
+
+### Exceedance Probability Curve (OEP vs AEP)
+
+The Occurrence Exceedance Probability (OEP) curve shows the probability that the
+**largest single event loss** in a given year exceeds a given threshold. The
+Aggregate Exceedance Probability (AEP) curve shows the same for the **total annual
+loss** across all events. AEP lies above OEP because it includes the compounding
+effect of multiple events in a single year.
+
+Both curves are standard outputs of cat model hazard modules and drive excess of
+loss reinsurance structuring. The shaded region indicates the 100–200 year return
+period range typically used for excess of loss attachment points and Solvency II capital
+calibration.
+
+```{r oep-plot, fig.cap = "OEP and AEP curves. Shaded region = 100–200 year return period."}
+# OEP: distribution of the maximum event loss per year
+set.seed(123)
+annual_losses    <- numeric(n_years)
+max_event_losses <- numeric(n_years)
+
+for (i in seq_len(n_years)) {
+  N <- rpois(1, 0.5)
+  if (N == 0) {
+    annual_losses[i]    <- 0
+    max_event_losses[i] <- 0
+  } else {
+    events <- replicate(N, simulate_event_loss(cop5d, mu, sigma, xi, E, vuln_params))
+    annual_losses[i]    <- sum(events)
+    max_event_losses[i] <- max(events)
+  }
+}
+
+
+aep_df <- data.frame(loss = sort(annual_losses, decreasing = TRUE)) %>%
+  mutate(rank          = seq_len(n()),
+         exceedance_p  = rank / n_years,
+         return_period = 1 / exceedance_p)
+
+oep_df <- data.frame(loss = sort(max_event_losses, decreasing = TRUE)) %>%
+  mutate(rank          = seq_len(n()),
+         exceedance_p  = rank / n_years,
+         return_period = 1 / exceedance_p)
+
+ggplot() +
+  # OEP (event loss)
+  geom_line(data = oep_df,
+            aes(x = return_period, y = loss / 1e9, colour = "OEP"),
+            linewidth = 1) +
+  # AEP (annual loss)
+  geom_line(data = aep_df,
+            aes(x = return_period, y = loss / 1e9, colour = "AEP"),
+            linewidth = 1, linetype = "dashed") +
+  annotate("rect", xmin = 100, xmax = 200, ymin = -Inf, ymax = Inf,
+           fill = "#DBEAFE", alpha = 0.5) +
+  scale_x_log10(breaks = c(2, 5, 10, 25, 50, 100, 200, 500, 1000),
+                labels = c("2","5","10","25","50","100","200","500","1000")) +
+  scale_colour_manual(name = "Curve type",
+    values = c("OEP" = "#1D4ED8", "AEP" = "#10B981")) +
+  coord_cartesian(xlim = c(1, 1000), ylim = c(0, 9)) +
+  labs(title    = "OEP vs AEP Loss Curves",
+    subtitle = "Event loss (OEP) vs annual aggregate loss (AEP)",
+    x        = "Return Period (years)",
+    y        = "Loss (bn EUR)",
+    caption  = "⚠ Synthetic model — educational use only") +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold"),
+    plot.subtitle   = element_text(colour = "#6B7280", size = 10),
+    plot.caption    = element_text(colour = "#9CA3AF", size = 8, hjust = 0),
+    panel.grid.minor = element_blank(),
+    legend.position  = "top"
+  )
+
+```
+
+---
+
+## Model Limitations
+
+This model is a demonstration of the core cat modelling workflow. Several simplifications
+should be noted before drawing any conclusions from the numerical outputs:
+
+**Hazard:** The GEV distributions and copula are fitted to annual maxima, which limits
+the effective sample to something between 150 and 200 observations per station.
+Non-stationarity in the mean is present at several stations (most markedly Roermond
+and Hoofddorp) and is not accounted for — return period estimates should be treated
+accordingly.
+
+The 5D Gumbel copula is used here not because it is the best-fitting family, but
+because it is the only extreme value copula available for dimensions greater than 2
+in R's `copula` package. The thesis practical chapter, [Extreme Precipitation in the Netherlands: GEV Modelling &
+Extreme Value Copulas](https://risam0arek.github.io/precipitation-extremes-gev-copula/)
+shows that bivariate copula selection via AIC favours Hüsler–Reiss for 6 of 10 station
+pairs and t-EV for 3 pairs — neither of which generalises to five dimensions in standard
+R implementations. The Gumbel copula additionally constrains all pairwise dependences
+to a single parameter θ, whereas the bivariate analysis revealed heterogeneous
+dependence strengths across pairs. A vine copula would resolve both limitations but is
+left as a natural extension.
+
+**Hazard metric:** Daily precipitation totals are used as the hazard intensity
+measure, which is a simplification. Flood damage is driven not only by peak
+daily rainfall but also by antecedent soil moisture, catchment characteristics,
+and multi-day accumulation — a 3-day or 5-day rolling maximum would better
+capture slow-onset riverine flooding, as opposed to flash floods where daily
+totals are more appropriate. River discharge data would be the most direct
+flood hazard metric, as it integrates all upstream processes, but sufficiently
+long records (100+ years) are not publicly available for most gauging
+stations at the resolution required for extreme value analysis. 
+
+**Frequency:** The Poisson rate $\lambda$ = 0.5 is a modelling assumption. 
+In a production cat model, $\lambda$ would be calibrated against historical 
+claims data or an event catalogue such as PERILS or Munich Re 
+NatCatSERVICE. In the absence of such data, $\lambda$ is treated as a 
+free parameter and is noted as a source of model uncertainty — 
+small changes in $\lambda$ scale the AAL proportionally.
+
+**Vulnerability:** Sigmoid curves are a standard functional form but real vulnerability
+functions are calibrated against observed insurance claims, stratified by construction
+type, age, number of storeys, and foundation type. The parameters here are illustrative.
+
+**Exposure:** The portfolio is entirely synthetic. A real application would use geocoded
+policy data with sums insured per location.
+
+---
+
+## Connection to my Thesis Practical Chapter
+
+This model operationalises the hazard analysis presented in the practical chapter of my thesis, [Extreme Precipitation in the Netherlands: GEV Modelling & Extreme Value Copulas](https://risam0arek.github.io/precipitation-extremes-gev-copula/), 
+which covers GEV fitting, bivariate copula selection, and joint return period estimation
+in detail. The GEV parameters (`params_table.rds`) and the 5D copula
+(`cop5d.rds`) are loaded directly from that chapter without re-estimation.
+
+The thesis practical chapter demonstrated that copula-implied joint exceedance probabilities are 14–98× higher than under independence for station pairs. That amplification carries through here: the dependence structure encoded in the copula is what determines the shape of the loss distribution tail — and therefore the VaR and TVaR estimates that drive reinsurance structuring and capital requirements.
