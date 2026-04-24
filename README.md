@@ -9,9 +9,16 @@ portfolio-level risk metrics — using methods directly applicable to the insura
 reinsurance industry.
 
 This project is a direct extension of my thesis practical chapter,
-[*Extreme Precipitation in the Netherlands: GEV Modelling & Extreme Value Copulas*](https://github.com/risam0arek/...),
+[*Extreme Precipitation in the Netherlands: GEV Modelling & Extreme Value Copulas*]
+(https://risam0arek.github.io/precipitation-extremes-gev-copula/),
 which covers the hazard and dependence analysis in detail. The GEV parameters and
 5D copula are loaded from that chapter without re-estimation.
+
+---
+
+## Live report
+
+👉 https://risam0arek.github.io/precipitation-catastrophe-model/
 
 ---
 
@@ -59,7 +66,7 @@ TVaR 99%  : EUR 5.395 bn   — mean loss conditional on exceeding VaR 99%
 
 The hazard component of this model — GEV distributions and the 5D Gumbel copula —
 is estimated in 
-[my thesis practical chapter](https://github.com/risam0arek/...). 
+[my thesis practical chapter](https://risam0arek.github.io/precipitation-extremes-gev-copula/). 
 That chapter shows that copula-implied 
 joint exceedance probabilities are **14× to 98× higher** than under independence
 for station pairs. This amplification carries directly into the loss distribution
