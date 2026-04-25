@@ -8,8 +8,7 @@ the core workflow of a probabilistic nat cat model — from hazard characterisat
 portfolio-level risk metrics — using methods directly applicable to the insurance and
 reinsurance industry.
 
-This project is a direct extension of [my thesis practical chapter]
-(https://risam0arek.github.io/precipitation-extremes-gev-copula/),
+This project is a direct extension of [my thesis practical chapter](https://risam0arek.github.io/precipitation-extremes-gev-copula/),
 *Extreme Precipitation in the Netherlands: GEV Modelling & Extreme Value Copulas*,
 which covers the hazard and dependence analysis in detail. The GEV parameters and
 5D copula are loaded from that chapter without re-estimation.
