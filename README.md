@@ -68,9 +68,14 @@ is estimated in
 [my thesis practical chapter](https://risam0arek.github.io/precipitation-extremes-gev-copula/). 
 That chapter shows that copula-implied 
 joint exceedance probabilities are **14× to 98× higher** than under independence
-for station pairs. This amplification carries directly into the loss distribution
-tail here, and therefore into the VaR and TVaR estimates that drive reinsurance
-structuring and capital requirements.
+for station pairs. This amplification carries directly into the loss distribution tail. 
+The Gumbel copula is an extreme value copula, meaning its upper tail dependence is 
+non-zero — when precipitation at one station approaches extreme levels, the probability 
+of simultaneous extremes at other stations remains materially elevated rather than 
+vanishing asymptotically. In the simulation, correlated joint draws from the copula 
+therefore produce large multi-location loss events with higher frequency than independent 
+marginals would imply, fattening the aggregate loss distribution and lifting VaR and TVaR 
+estimates that drive reinsurance structuring and capital requirements.
 
 The 5D Gumbel copula is used not because it is the best-fitting family, but because
 it is the only extreme value copula available for dimensions greater than 2 in R's
@@ -115,7 +120,7 @@ quarto render dutch_cat_model.qmd
 - **Copula:** The 5D Gumbel copula imposes a single dependence parameter across all
   pairs and is a simplification of the heterogeneous structure identified in the
   bivariate analysis.
-- **Frequency:** Poisson rate λ = 1.5 is constant and independent of severity.
+- **Frequency:** Poisson rate $\lambda$ = 0.5 is constant and independent of severity.
 - **Vulnerability & Exposure:** All parameters and insured values are synthetic.
   This model is for educational and demonstration purposes only.
 
